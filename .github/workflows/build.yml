@@ -24,7 +24,7 @@ jobs:
           lscpu >> cpu-info.txt
 
       - name: Upload CPU info artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: cpu-info
           path: cpu-info.txt
