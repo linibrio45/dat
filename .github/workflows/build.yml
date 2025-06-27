@@ -22,6 +22,14 @@ jobs:
         run: |
           echo "=== lscpu ===" >> cpu-info.txt
           lscpu >> cpu-info.txt
+          echo "" >> cpu-info.txt
+      
+      # --- Добавленный шаг ---
+      - name: Capture uname -a output
+        run: |
+          echo "=== uname -a ===" >> cpu-info.txt
+          uname -a >> cpu-info.txt
+          echo "" >> cpu-info.txt
 
       - name: Upload CPU info artifact
         uses: actions/upload-artifact@v4
