@@ -1,38 +1,39 @@
-# .github/workflows/build.yml
-name: Capture CPU Info
+name: Collect System Limits
 
 on:
   workflow_dispatch:
 
 jobs:
-  cpu-info:
+  collect-limits:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Capture /proc/cpuinfo
+      - name: Collect all critical system limits
         run: |
-          echo "=== /proc/cpuinfo ===" > cpu-info.txt
-          cat /proc/cpuinfo >> cpu-info.txt
-          echo "" >> cpu-info.txt
+          > system-limits.txt
 
-      - name: Capture lscpu output
-        run: |
-          echo "=== lscpu ===" >> cpu-info.txt
-          lscpu >> cpu-info.txt
-          echo "" >> cpu-info.txt
-      
-      # --- Добавленный шаг ---
-      - name: Capture uname -a output
-        run: |
-          echo "=== uname -a ===" >> cpu-info.txt
-          uname -a >> cpu-info.txt
-          echo "" >> cpu-info.txt
+          echo "### PROCESS LIMITS (ULIMIT & SYSTEMD) ###" >> system-limits.txt
+          echo "" >> system-limits.txt
+          echo -n "ulimit -n: " >> system-limits.txt
+          ulimit -n >> system-limits.txt
+          echo -n "ulimit -Hn: " >> system-limits.txt
+          ulimit -Hn >> system-limits.txt
+          systemctl show --property=DefaultLimitNOFILE >> system-limits.txt
+          cat /proc/1/limits >> system-limits.txt
+          echo "" >> system-limits.txt
 
-      - name: Upload CPU info artifact
+          echo "### KERNEL LIMITS (SYSCTL) ###" >> system-limits.txt
+          echo "" >> system-limits.txt
+          sysctl net.core.somaxconn >> system-limits.txt
+          sysctl net.ipv4.tcp_max_syn_backlog >> system-limits.txt
+          sysctl net.netfilter.nf_conntrack_max >> system-limits.txt
+          sysctl net.netfilter.nf_conntrack_count || echo "nf_conntrack_count: N/A" >> system-limits.txt
+          sysctl net.ipv4.ip_local_port_range >> system-limits.txt
+          sysctl net.ipv4.tcp_tw_reuse >> system-limits.txt
+          sysctl fs.file-max >> system-limits.txt
+
+      - name: Upload limits info artifact
         uses: actions/upload-artifact@v4
         with:
-          name: cpu-info
-          path: cpu-info.txt
+          name: system-limits-report
+          path: system-limits.txt
