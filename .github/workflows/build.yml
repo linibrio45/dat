@@ -1,0 +1,30 @@
+# .github/workflows/build.yml
+name: Capture CPU Info
+
+on:
+  workflow_dispatch:
+
+jobs:
+  cpu-info:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Capture /proc/cpuinfo
+        run: |
+          echo "=== /proc/cpuinfo ===" > cpu-info.txt
+          cat /proc/cpuinfo >> cpu-info.txt
+          echo "" >> cpu-info.txt
+
+      - name: Capture lscpu output
+        run: |
+          echo "=== lscpu ===" >> cpu-info.txt
+          lscpu >> cpu-info.txt
+
+      - name: Upload CPU info artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: cpu-info
+          path: cpu-info.txt
