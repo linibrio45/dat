@@ -36,32 +36,27 @@ jobs:
       - name: Run Services and Get Public URL
         timeout-minutes: 10
         run: |
-          # Запускаем Uvicorn в фоне
+          # Запускаем все в фоне
           uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4 --loop uvloop --http httptools &
-          
-          # Даем Uvicorn время на старт
           sleep 5
-          
-          # Создаем лог-файл заранее, чтобы избежать гонки с grep
           touch cloudflared.log
-          
-          # Запускаем Cloudflared с протоколом http2
           cloudflared tunnel --url http://localhost:8000 --no-autoupdate --logfile cloudflared.log --protocol http2 &
           
           echo "Waiting for Cloudflared URL... (up to 90 seconds)"
           
           # Цикл ожидания
           for i in {1..45}; do
-            URL=$(grep -o 'https://.*\.trycloudflare.com' cloudflared.log)
+            # ФИНАЛЬНОЕ ИСПРАВЛЕНИЕ: Добавляем '|| true', чтобы grep не ронял скрипт, если ничего не найдет.
+            # Теперь, если URL не найден, переменная $URL будет пустой, и цикл продолжится.
+            URL=$(grep -o 'https://.*\.trycloudflare.com' cloudflared.log || true)
+
+            # Эта проверка теперь будет работать корректно на каждой итерации
             if [ -n "$URL" ]; then
               echo "===================================================================="
               echo "✅ Your public URL is: $URL"
               echo "===================================================================="
               echo "Server is running. Workflow will not exit."
-
-              # ИСПРАВЛЕНИЕ: Мы убрали 'exit 0' после этой строки.
-              # Теперь скрипт "зависнет" на этой команде, как и нужно,
-              # и не будет завершаться, поддерживая работу фоновых процессов.
+              # Зависаем здесь навечно, чтобы поддерживать работу серверов
               tail -f /dev/null
             fi
             sleep 2
