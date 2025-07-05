@@ -1,39 +1,136 @@
-name: Collect System Limits
+name: Test Direct Public IP Access
 
 on:
   workflow_dispatch:
 
 jobs:
-  collect-limits:
+  run-direct-access-test:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Collect all critical system limits
+      - name: Setup Python and Dependencies
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+        
+      - run: pip install requests
+
+      - name: Create Server file (server.py)
         run: |
-          > system-limits.txt
+          cat <<'EOF' > server.py
+          import asyncio
+          import json
 
-          echo "### PROCESS LIMITS (ULIMIT & SYSTEMD) ###" >> system-limits.txt
-          echo "" >> system-limits.txt
-          echo -n "ulimit -n: " >> system-limits.txt
-          ulimit -n >> system-limits.txt
-          echo -n "ulimit -Hn: " >> system-limits.txt
-          ulimit -Hn >> system-limits.txt
-          systemctl show --property=DefaultLimitNOFILE >> system-limits.txt
-          cat /proc/1/limits >> system-limits.txt
-          echo "" >> system-limits.txt
+          async def handle_client(reader, writer):
+              addr = writer.get_extra_info('peername')
+              print(f"[*] Connection received from {addr}")
+              response_payload = {"status": "ok", "message": "Если ты это видишь, NAT не существует"}
+              response_body = json.dumps(response_payload).encode('utf-8')
+              response_headers = [
+                  "HTTP/1.1 200 OK",
+                  f"Content-Type: application/json; charset=utf-8",
+                  f"Content-Length: {len(response_body)}",
+                  "Connection: close",
+                  "\r\n"
+              ]
+              writer.write("\r\n".join(response_headers).encode('utf-8') + response_body)
+              await writer.drain()
+              writer.close()
 
-          echo "### KERNEL LIMITS (SYSCTL) ###" >> system-limits.txt
-          echo "" >> system-limits.txt
-          sysctl net.core.somaxconn >> system-limits.txt
-          sysctl net.ipv4.tcp_max_syn_backlog >> system-limits.txt
-          sysctl net.netfilter.nf_conntrack_max >> system-limits.txt
-          sysctl net.netfilter.nf_conntrack_count || echo "nf_conntrack_count: N/A" >> system-limits.txt
-          sysctl net.ipv4.ip_local_port_range >> system-limits.txt
-          sysctl net.ipv4.tcp_tw_reuse >> system-limits.txt
-          sysctl fs.file-max >> system-limits.txt
+          async def main():
+              # Биндим на все интерфейсы (0.0.0.0) и привилегированный порт 80
+              server = await asyncio.start_server(handle_client, '0.0.0.0', 80)
+              addrs = ', '.join(str(sock.getsockname()) for sock in server.sockets)
+              print(f'[*] Server is listening on {addrs}')
+              async with server:
+                  await server.serve_forever()
 
-      - name: Upload limits info artifact
+          if __name__ == '__main__':
+              print("[!] Starting server. This requires sudo.")
+              try:
+                  asyncio.run(main())
+              except PermissionError:
+                  print("FATAL: Permission denied to bind to port 80. Run with sudo.")
+              except Exception as e:
+                  print(f"An error occurred: {e}")
+          EOF
+
+      - name: Create Client file (client.py)
+        run: |
+          cat <<'EOF' > client.py
+          import requests
+          import sys
+
+          def make_request(ip_address):
+              url = f"http://{ip_address}/"
+              output_file = "response.log"
+              print(f"[*] Attempting to connect to public URL: {url}...")
+              try:
+                  # Таймаут 15 секунд. Если за это время не подключится, значит не судьба.
+                  response = requests.get(url, timeout=15)
+                  response.raise_for_status()
+                  content_to_save = response.text
+                  print(f"[+] SUCCESS! Server response saved to {output_file}")
+              except requests.exceptions.RequestException as e:
+                  content_to_save = f"ОШИБКА: Connection failed.\nReason: {e}"
+                  print(f"[!] FAILED! Error during request: {e}")
+              with open(output_file, 'w', encoding='utf-8') as f:
+                  f.write(content_to_save)
+
+          if __name__ == '__main__':
+              target_ip = sys.argv[1]
+              make_request(target_ip)
+          EOF
+
+      - name: Run the experiment
+        run: |
+          echo "### 1. Starting server on 0.0.0.0:80 in background ###"
+          # Запускаем с sudo, т.к. порт 80 привилегированный
+          sudo python3 server.py &
+          SERVER_PID=$!
+          # Ждем пару секунд, чтобы сервер успел запуститься
+          sleep 3
+
+          echo "### 2. Opening port 80 in firewall ###"
+          # ufw не установлен, используем iptables - это более низкоуровневый и надежный способ
+          sudo iptables -I INPUT -p tcp --dport 80 -j ACCEPT
+          sudo iptables -L INPUT --line-numbers
+
+          echo "### 3. Getting public IP address ###"
+          PUBLIC_IP=$(curl -s ifconfig.me)
+          echo "Public IP detected: $PUBLIC_IP"
+          if [ -z "$PUBLIC_IP" ]; then
+              echo "::error::Could not retrieve public IP."
+              sudo kill $SERVER_PID
+              exit 1
+          fi
+
+          echo "### 4. Running client to connect to Public IP ###"
+          # Запускаем клиент, который попытается подключиться к этому IP
+          python3 client.py $PUBLIC_IP
+          
+          echo "### 5. Cleaning up... ###"
+          sudo kill $SERVER_PID
+
+      - name: Analyze the result and report
+        run: |
+          echo "### Experiment Result Analysis ###"
+          echo "Content of response.log:"
+          echo "-------------------------------------"
+          cat response.log
+          echo "-------------------------------------"
+
+          if grep -q "ОШИБКА" response.log; then
+            echo ""
+            echo "::error::Тест провалился, как и ожидалось. Клиент НЕ СМОГ подключиться к серверу через публичный IP."
+            echo "Это доказывает, что воркер находится за NAT. IP-адрес, полученный от ifconfig.me, является адресом общего шлюза, а не самого воркера. Входящие запросы на него не маршрутизируются на нашу временную машину."
+            exit 1
+          else
+            echo "::warning::Этого не может быть. Если ты это видишь, ты сломал интернет. Поздравляю."
+          fi
+
+      - name: Upload response log artifact
         uses: actions/upload-artifact@v4
         with:
-          name: system-limits-report
-          path: system-limits.txt
+          name: direct-access-test-log
+          path: response.log
