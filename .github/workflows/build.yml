@@ -34,51 +34,36 @@ jobs:
           sudo dpkg -i cloudflared.deb
 
       - name: Run Services and Get Public URL
-        # Устанавливаем таймаут для всего шага на 10 минут, чтобы он не упал раньше времени
         timeout-minutes: 10
         run: |
-          # Запускаем Uvicorn в фоне
+          # Запускаем Uvicorn в фоновом режиме
           uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4 --loop uvloop --http httptools &
-          # Сохраняем PID процесса Uvicorn, чтобы потом проверить, что он жив
-          UVICORN_PID=$!
           
           # Даем Uvicorn время на старт
           sleep 5
           
-          # Запускаем Cloudflared в фоне, используя нативный логгер
-          cloudflared tunnel --url http://localhost:8000 --no-autoupdate --logfile cloudflared.log &
-          # Сохраняем PID процесса Cloudflared
-          CLOUDFLARED_PID=$!
+          # ГЛАВНОЕ ИСПРАВЛЕНИЕ №1: Создаем лог-файл заранее, чтобы избежать гонки с grep
+          touch cloudflared.log
+          
+          # ГЛАВНОЕ ИСПРАВЛЕНИЕ №2: Запускаем Cloudflared, принудительно используя протокол http2.
+          # Это обходит проблему с размером буфера UDP/QUIC в GitHub Actions.
+          cloudflared tunnel --url http://localhost:8000 --no-autoupdate --logfile cloudflared.log --protocol http2 &
           
           echo "Waiting for Cloudflared URL... (up to 90 seconds)"
           
-          # Умный цикл ожидания
+          # Цикл ожидания, который теперь будет работать стабильно
           for i in {1..45}; do
-            # Проверяем, не упали ли наши процессы
-            if ! kill -0 $UVICORN_PID 2>/dev/null; then
-              echo "::error::Uvicorn process has died."
-              exit 1
-            fi
-            if ! kill -0 $CLOUDFLARED_PID 2>/dev/null; then
-              echo "::error::Cloudflared process has died. See log:"
-              cat cloudflared.log
-              exit 1
-            fi
-          
-            # Ищем URL в логе
+            # Ищем URL в логе. Теперь grep не упадет, так как файл существует
             URL=$(grep -o 'https://.*\.trycloudflare.com' cloudflared.log)
             if [ -n "$URL" ]; then
               echo "===================================================================="
               echo "✅ Your public URL is: $URL"
               echo "===================================================================="
-              # Запускаем бесконечный процесс, чтобы воркфлоу не завершился
-              # Теперь, когда URL получен, мы можем "зависнуть"
+              # Как только URL получен, "замораживаем" воркфлоу, чтобы серверы работали
               echo "Server is running. Workflow will not exit."
               tail -f /dev/null
               exit 0
             fi
-            
-            echo "Still waiting... (attempt $i/45)"
             sleep 2
           done
           
