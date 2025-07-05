@@ -1,4 +1,4 @@
-name: Axum SIMD JSON via Cloudflared
+name: Axum via Cloudflared
 
 on:
   workflow_dispatch:
@@ -27,7 +27,7 @@ jobs:
 
       - name: Create Axum project files
         run: |
-          # Создаем Cargo.toml
+          # Возвращаемся к простому и надежному Cargo.toml
           cat << 'EOF' > Cargo.toml
           [package]
           name = "axum-server"
@@ -38,24 +38,20 @@ jobs:
           axum = "0.8.4"
           tokio = { version = "1.46.0", features = ["full"] }
           serde_json = "1.0.140"
-          
-          # ИСПРАВЛЕНИЕ: Мы полностью убрали ошибочную строку 'features = ["axum"]'.
-          # Интеграция с Axum доступна в sonic-rs по умолчанию.
-          sonic-rs = "0.4.1"
           EOF
 
           # Создаем папку src и файл main.rs
           mkdir src
           cat << 'EOF' > src/main.rs
-          // Используем правильный путь импорта
-          use sonic_rs::axum::Json; 
-          use sonic_rs::json;
-
+          // Используем стандартный Json из Axum
           use axum::{
-              routing::get,
               response::IntoResponse,
-              Router
+              routing::get,
+              Json,
+              Router,
           };
+          // Используем макрос json! из serde_json
+          use serde_json::json;
           use std::net::SocketAddr;
           use std::sync::atomic::{AtomicU64, Ordering};
           use std::time::Duration;
@@ -75,7 +71,7 @@ jobs:
               let app = Router::new().route("/", get(handler));
 
               let addr = SocketAddr::from(([0, 0, 0, 0], 8000));
-              println!("Axum server with SIMD JSON listening on {}", addr);
+              println!("Axum server listening on {}", addr);
 
               let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
               axum::serve(listener, app).await.unwrap();
@@ -83,6 +79,7 @@ jobs:
 
           async fn handler() -> impl IntoResponse {
               RPS_COUNTER.fetch_add(1, Ordering::Relaxed);
+              // Эта конструкция абсолютно стандартна и надежна
               Json(json!({ "message": "Hello, World!" }))
           }
           EOF
