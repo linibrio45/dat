@@ -17,8 +17,6 @@ jobs:
         run: pip install fastapi "uvicorn[standard]" uvloop httptools
 
       - name: Create FastAPI app file
-        # ИСПРАВЛЕНИЕ: Используем heredoc (cat << 'EOF') для надежной записи
-        # многострочного файла. Это решает проблему с символом '@'.
         run: |
           cat << 'EOF' > main.py
           from fastapi import FastAPI
@@ -43,23 +41,31 @@ jobs:
           # Даем Uvicorn пару секунд на запуск
           sleep 5
           
-          # Запускаем Cloudflared для создания туннеля
+          # ИСПРАВЛЕНИЕ: Создаем пустой лог-файл ЗАРАНЕЕ.
+          # Это предотвратит падение команды grep, если cloudflared еще не успел создать файл.
+          touch cloudflared.log
+          
+          # Запускаем Cloudflared и направляем его вывод в лог
           cloudflared tunnel --url http://localhost:8000 --no-autoupdate > cloudflared.log 2>&1 &
 
-          # Ждем, пока Cloudflared сгенерирует и запишет URL в лог
+          # Ждем, пока Cloudflared сгенерирует URL.
+          # Увеличили таймаут на всякий случай.
           echo "Waiting for Cloudflared URL..."
-          for i in {1..10}; do
+          for i in {1..15}; do
             if grep -q "trycloudflare.com" cloudflared.log; then
               break
             fi
-            echo "Still waiting..."
+            echo "Still waiting... (attempt $i/15)"
             sleep 2
           done
           
           # Извлекаем URL и выводим его в консоль
           PUBLIC_URL=$(grep -o 'https://.*\.trycloudflare.com' cloudflared.log)
+
+          # Теперь этот блок обработки ошибок сработает корректно, если URL не будет найден
           if [ -z "$PUBLIC_URL" ]; then
-            echo "::error::Could not retrieve Cloudflared URL. Tailing log for debug:"
+            echo "::error::Could not retrieve Cloudflared URL after 30 seconds."
+            echo "::error::Displaying cloudflared.log for debugging:"
             cat cloudflared.log
             exit 1
           fi
