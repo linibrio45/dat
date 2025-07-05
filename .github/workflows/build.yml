@@ -10,11 +10,14 @@ jobs:
     steps:
       - name: Install Speedtest CLI
         run: |
-          curl -s https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.deb.sh | sudo bash
-          sudo apt-get install -y speedtest
+          # Скачиваем архив с официального сайта
+          curl -Lo speedtest.tgz https://install.speedtest.net/app/cli/ookla-speedtest-1.2.0-linux-x86_64.tgz
+          # Распаковываем его
+          tar -xzf speedtest.tgz
 
       - name: Run Speedtest and Save Result
-        run: speedtest --accept-license --accept-gdpr > speedtest-result.txt
+        # Запускаем бинарник из текущей папки и принимаем лицензию
+        run: ./speedtest --accept-license --accept-gdpr > speedtest-result.txt
 
       - name: Upload Speedtest Result
         uses: actions/upload-artifact@v4
