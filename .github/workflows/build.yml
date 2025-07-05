@@ -16,12 +16,32 @@ jobs:
       - name: Install Python dependencies
         run: pip install fastapi "uvicorn[standard]" uvloop httptools
 
-      - name: Create FastAPI app file
+      - name: Create FastAPI app file with RPS counter
         run: |
+          # Создаем файл main.py с логикой для подсчета RPS
           cat << 'EOF' > main.py
-          from fastapi import FastAPI
+          import os
+          import uuid
+          from pathlib import Path
+          from fastapi import FastAPI, Request
+
+          # Папка для временных файлов-счетчиков
+          RPS_COUNTER_DIR = Path("/tmp/rps_counters")
+          RPS_COUNTER_DIR.mkdir(exist_ok=True)
 
           app = FastAPI()
+
+          # Middleware, который выполняется для каждого запроса
+          @app.middleware("http")
+          async def count_requests_middleware(request: Request, call_next):
+              # Создаем уникальный пустой файл для этого запроса.
+              # Имя файла состоит из ID процесса и уникального ID запроса.
+              # Это гарантирует, что даже один воркер, обработавший 1000 запросов
+              # в секунду, создаст 1000 уникальных файлов.
+              Path(RPS_COUNTER_DIR, f"{os.getpid()}-{uuid.uuid4()}").touch()
+              
+              response = await call_next(request)
+              return response
 
           @app.get("/")
           async def main():
@@ -36,34 +56,45 @@ jobs:
       - name: Run Services and Get Public URL
         timeout-minutes: 10
         run: |
-          # Запускаем все в фоне
-          uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4 --loop uvloop --http httptools &
+          # 1. Запускаем Uvicorn в фоне с ОТКЛЮЧЕННЫМИ логами доступа
+          uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4 --loop uvloop --http httptools --no-access-log &
+          
           sleep 5
           touch cloudflared.log
+          
+          # 2. Запускаем Cloudflared
           cloudflared tunnel --url http://localhost:8000 --no-autoupdate --logfile cloudflared.log --protocol http2 &
           
+          # 3. Запускаем в фоне наш скрипт для подсчета RPS
+          (
+            while true; do
+              sleep 1
+              # Считаем количество файлов в директории
+              count=$(find /tmp/rps_counters -type f | wc -l)
+              # Выводим RPS
+              echo "RPS: $count"
+              # Удаляем файлы, чтобы обнулить счетчик на следующую секунду
+              find /tmp/rps_counters -type f -delete
+            done
+          ) &
+
           echo "Waiting for Cloudflared URL... (up to 90 seconds)"
           
-          # Цикл ожидания
+          # Цикл ожидания URL
           for i in {1..45}; do
-            # ФИНАЛЬНОЕ ИСПРАВЛЕНИЕ: Добавляем '|| true', чтобы grep не ронял скрипт, если ничего не найдет.
-            # Теперь, если URL не найден, переменная $URL будет пустой, и цикл продолжится.
             URL=$(grep -o 'https://.*\.trycloudflare.com' cloudflared.log || true)
 
-            # Эта проверка теперь будет работать корректно на каждой итерации
             if [ -n "$URL" ]; then
               echo "===================================================================="
               echo "✅ Your public URL is: $URL"
               echo "===================================================================="
               echo "Server is running. Workflow will not exit."
-              # Зависаем здесь навечно, чтобы поддерживать работу серверов
+              # Зависаем здесь навечно
               tail -f /dev/null
             fi
             sleep 2
           done
           
-          # Этот код выполнится, только если URL не будет найден за 90 секунд
           echo "::error::Failed to get Cloudflared URL within 90 seconds."
-          echo "Dumping cloudflared.log:"
           cat cloudflared.log
           exit 1
