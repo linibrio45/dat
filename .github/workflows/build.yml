@@ -1,53 +1,105 @@
-name: FastAPI via Cloudflared
+name: Axum SIMD JSON via Cloudflared
 
 on:
   workflow_dispatch:
 
 jobs:
-  run-fastapi-service:
+  run-axum-service:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Set up Rust toolchain
+        uses: actions-rs/toolchain@v1
         with:
-          python-version: '3.11'
+          toolchain: stable
+          override: true
 
-      - name: Install Python dependencies
-        run: pip install fastapi "uvicorn[standard]" uvloop httptools
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Create FastAPI app file with RPS counter
+      - name: Create Axum project files
         run: |
-          # Создаем файл main.py с логикой для подсчета RPS
-          cat << 'EOF' > main.py
-          import os
-          import uuid
-          from pathlib import Path
-          from fastapi import FastAPI, Request
+          # Создаем Cargo.toml с SIMD-библиотекой sonic-rs
+          # Мы также оставляем serde_json, так как его макрос json! очень удобен для создания JSON-литералов
+          cat << 'EOF' > Cargo.toml
+          [package]
+          name = "axum-server"
+          version = "0.1.0"
+          edition = "2021"
 
-          # Папка для временных файлов-счетчиков
-          RPS_COUNTER_DIR = Path("/tmp/rps_counters")
-          RPS_COUNTER_DIR.mkdir(exist_ok=True)
-
-          app = FastAPI()
-
-          # Middleware, который выполняется для каждого запроса
-          @app.middleware("http")
-          async def count_requests_middleware(request: Request, call_next):
-              # Создаем уникальный пустой файл для этого запроса.
-              # Имя файла состоит из ID процесса и уникального ID запроса.
-              # Это гарантирует, что даже один воркер, обработавший 1000 запросов
-              # в секунду, создаст 1000 уникальных файлов.
-              Path(RPS_COUNTER_DIR, f"{os.getpid()}-{uuid.uuid4()}").touch()
-              
-              response = await call_next(request)
-              return response
-
-          @app.get("/")
-          async def main():
-              return {"message": "Hello, World!"}
+          [dependencies]
+          axum = "0.8.4"
+          tokio = { version = "1.46.0", features = ["full"] }
+          serde_json = "1.0.140"
+          
+          # Наша SIMD-библиотека для JSON
+          sonic-rs = "0.4.1"
           EOF
 
+          # Создаем папку src и файл main.rs
+          mkdir src
+          cat << 'EOF' > src/main.rs
+          // Используем экстрактор Json из sonic-rs, а не из Axum
+          use sonic_rs::{Json, json};
+          use axum::{
+              routing::get,
+              response::IntoResponse,
+              Router
+          };
+          use std::net::SocketAddr;
+          use std::sync::atomic::{AtomicU64, Ordering};
+          use std::time::Duration;
+
+          // Глобальный, потокобезопасный атомарный счетчик для RPS
+          static RPS_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+          #[tokio::main]
+          async fn main() {
+              // Запускаем в отдельном потоке цикл для вывода RPS
+              tokio::spawn(async move {
+                  loop {
+                      tokio::time::sleep(Duration::from_secs(1)).await;
+                      let count = RPS_COUNTER.swap(0, Ordering::Relaxed);
+                      println!("RPS: {}", count);
+                  }
+              });
+
+              // Создаем роутер Axum
+              let app = Router::new().route("/", get(handler));
+
+              let addr = SocketAddr::from(([0, 0, 0, 0], 8000));
+              println!("Axum server with SIMD JSON listening on {}", addr);
+
+              // Запускаем сервер
+              let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+              axum::serve(listener, app).await.unwrap();
+          }
+
+          // Обработчик запроса
+          async fn handler() -> impl IntoResponse {
+              RPS_COUNTER.fetch_add(1, Ordering::Relaxed);
+              
+              // КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Мы используем Json() от sonic-rs,
+              // чтобы сериализация нашего ответа была максимально быстрой
+              // благодаря SIMD. Макрос json! мы по-прежнему можем использовать
+              // для удобства.
+              Json(json!({ "message": "Hello, World!" }))
+          }
+          EOF
+
+      - name: Build Axum project with native optimizations
+        run: |
+          # Компиляция с флагом нативной оптимизации для максимальной скорости
+          RUSTFLAGS='-C target-cpu=native' cargo build --release
+          
       - name: Install Cloudflared
         run: |
           curl -L --output cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
@@ -56,40 +108,25 @@ jobs:
       - name: Run Services and Get Public URL
         timeout-minutes: 10
         run: |
-          # 1. Запускаем Uvicorn в фоне с ОТКЛЮЧЕННЫМИ логами доступа
-          uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4 --loop uvloop --http httptools --no-access-log &
+          # Запускаем наш скомпилированный Axum сервер в фоне
+          ./target/release/axum-server &
           
           sleep 5
           touch cloudflared.log
           
-          # 2. Запускаем Cloudflared
+          # Запускаем Cloudflared
           cloudflared tunnel --url http://localhost:8000 --no-autoupdate --logfile cloudflared.log --protocol http2 &
           
-          # 3. Запускаем в фоне наш скрипт для подсчета RPS
-          (
-            while true; do
-              sleep 1
-              # Считаем количество файлов в директории
-              count=$(find /tmp/rps_counters -type f | wc -l)
-              # Выводим RPS
-              echo "RPS: $count"
-              # Удаляем файлы, чтобы обнулить счетчик на следующую секунду
-              find /tmp/rps_counters -type f -delete
-            done
-          ) &
-
           echo "Waiting for Cloudflared URL... (up to 90 seconds)"
           
           # Цикл ожидания URL
           for i in {1..45}; do
             URL=$(grep -o 'https://.*\.trycloudflare.com' cloudflared.log || true)
-
             if [ -n "$URL" ]; then
               echo "===================================================================="
               echo "✅ Your public URL is: $URL"
               echo "===================================================================="
               echo "Server is running. Workflow will not exit."
-              # Зависаем здесь навечно
               tail -f /dev/null
             fi
             sleep 2
