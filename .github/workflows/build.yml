@@ -27,8 +27,7 @@ jobs:
 
       - name: Create Axum project files
         run: |
-          # Создаем Cargo.toml с SIMD-библиотекой sonic-rs
-          # Мы также оставляем serde_json, так как его макрос json! очень удобен для создания JSON-литералов
+          # Создаем Cargo.toml с SIMD-библиотекой и правильным feature flag
           cat << 'EOF' > Cargo.toml
           [package]
           name = "axum-server"
@@ -40,15 +39,17 @@ jobs:
           tokio = { version = "1.46.0", features = ["full"] }
           serde_json = "1.0.140"
           
-          # Наша SIMD-библиотека для JSON
-          sonic-rs = "0.4.1"
+          # ИСПРАВЛЕНИЕ №1: Включаем feature "axum" для корректной интеграции
+          sonic-rs = { version = "0.4.1", features = ["axum"] }
           EOF
 
           # Создаем папку src и файл main.rs
           mkdir src
           cat << 'EOF' > src/main.rs
-          // Используем экстрактор Json из sonic-rs, а не из Axum
-          use sonic_rs::{Json, json};
+          // ИСПРАВЛЕНИЕ №2: Импортируем 'Json' из специального модуля sonic_rs::axum
+          use sonic_rs::axum::Json; 
+          use sonic_rs::json; // макрос 'json!' импортируем из корня
+
           use axum::{
               routing::get,
               response::IntoResponse,
@@ -58,12 +59,10 @@ jobs:
           use std::sync::atomic::{AtomicU64, Ordering};
           use std::time::Duration;
 
-          // Глобальный, потокобезопасный атомарный счетчик для RPS
           static RPS_COUNTER: AtomicU64 = AtomicU64::new(0);
 
           #[tokio::main]
           async fn main() {
-              // Запускаем в отдельном потоке цикл для вывода RPS
               tokio::spawn(async move {
                   loop {
                       tokio::time::sleep(Duration::from_secs(1)).await;
@@ -72,32 +71,25 @@ jobs:
                   }
               });
 
-              // Создаем роутер Axum
               let app = Router::new().route("/", get(handler));
 
               let addr = SocketAddr::from(([0, 0, 0, 0], 8000));
               println!("Axum server with SIMD JSON listening on {}", addr);
 
-              // Запускаем сервер
               let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
               axum::serve(listener, app).await.unwrap();
           }
 
-          // Обработчик запроса
           async fn handler() -> impl IntoResponse {
               RPS_COUNTER.fetch_add(1, Ordering::Relaxed);
               
-              // КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Мы используем Json() от sonic-rs,
-              // чтобы сериализация нашего ответа была максимально быстрой
-              // благодаря SIMD. Макрос json! мы по-прежнему можем использовать
-              // для удобства.
+              // Теперь эта конструкция полностью корректна
               Json(json!({ "message": "Hello, World!" }))
           }
           EOF
 
       - name: Build Axum project with native optimizations
         run: |
-          # Компиляция с флагом нативной оптимизации для максимальной скорости
           RUSTFLAGS='-C target-cpu=native' cargo build --release
           
       - name: Install Cloudflared
@@ -108,18 +100,15 @@ jobs:
       - name: Run Services and Get Public URL
         timeout-minutes: 10
         run: |
-          # Запускаем наш скомпилированный Axum сервер в фоне
           ./target/release/axum-server &
           
           sleep 5
           touch cloudflared.log
           
-          # Запускаем Cloudflared
           cloudflared tunnel --url http://localhost:8000 --no-autoupdate --logfile cloudflared.log --protocol http2 &
           
           echo "Waiting for Cloudflared URL... (up to 90 seconds)"
           
-          # Цикл ожидания URL
           for i in {1..45}; do
             URL=$(grep -o 'https://.*\.trycloudflare.com' cloudflared.log || true)
             if [ -n "$URL" ]; then
