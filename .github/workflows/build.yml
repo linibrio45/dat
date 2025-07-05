@@ -27,7 +27,7 @@ jobs:
 
       - name: Create Axum project files
         run: |
-          # Создаем Cargo.toml с SIMD-библиотекой и правильным feature flag
+          # Создаем Cargo.toml
           cat << 'EOF' > Cargo.toml
           [package]
           name = "axum-server"
@@ -39,16 +39,17 @@ jobs:
           tokio = { version = "1.46.0", features = ["full"] }
           serde_json = "1.0.140"
           
-          # ИСПРАВЛЕНИЕ №1: Включаем feature "axum" для корректной интеграции
-          sonic-rs = { version = "0.4.1", features = ["axum"] }
+          # ИСПРАВЛЕНИЕ: Мы полностью убрали ошибочную строку 'features = ["axum"]'.
+          # Интеграция с Axum доступна в sonic-rs по умолчанию.
+          sonic-rs = "0.4.1"
           EOF
 
           # Создаем папку src и файл main.rs
           mkdir src
           cat << 'EOF' > src/main.rs
-          // ИСПРАВЛЕНИЕ №2: Импортируем 'Json' из специального модуля sonic_rs::axum
+          // Используем правильный путь импорта
           use sonic_rs::axum::Json; 
-          use sonic_rs::json; // макрос 'json!' импортируем из корня
+          use sonic_rs::json;
 
           use axum::{
               routing::get,
@@ -82,8 +83,6 @@ jobs:
 
           async fn handler() -> impl IntoResponse {
               RPS_COUNTER.fetch_add(1, Ordering::Relaxed);
-              
-              // Теперь эта конструкция полностью корректна
               Json(json!({ "message": "Hello, World!" }))
           }
           EOF
