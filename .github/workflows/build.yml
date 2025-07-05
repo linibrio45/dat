@@ -36,38 +36,38 @@ jobs:
       - name: Run Services and Get Public URL
         timeout-minutes: 10
         run: |
-          # Запускаем Uvicorn в фоновом режиме
+          # Запускаем Uvicorn в фоне
           uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4 --loop uvloop --http httptools &
           
           # Даем Uvicorn время на старт
           sleep 5
           
-          # ГЛАВНОЕ ИСПРАВЛЕНИЕ №1: Создаем лог-файл заранее, чтобы избежать гонки с grep
+          # Создаем лог-файл заранее, чтобы избежать гонки с grep
           touch cloudflared.log
           
-          # ГЛАВНОЕ ИСПРАВЛЕНИЕ №2: Запускаем Cloudflared, принудительно используя протокол http2.
-          # Это обходит проблему с размером буфера UDP/QUIC в GitHub Actions.
+          # Запускаем Cloudflared с протоколом http2
           cloudflared tunnel --url http://localhost:8000 --no-autoupdate --logfile cloudflared.log --protocol http2 &
           
           echo "Waiting for Cloudflared URL... (up to 90 seconds)"
           
-          # Цикл ожидания, который теперь будет работать стабильно
+          # Цикл ожидания
           for i in {1..45}; do
-            # Ищем URL в логе. Теперь grep не упадет, так как файл существует
             URL=$(grep -o 'https://.*\.trycloudflare.com' cloudflared.log)
             if [ -n "$URL" ]; then
               echo "===================================================================="
               echo "✅ Your public URL is: $URL"
               echo "===================================================================="
-              # Как только URL получен, "замораживаем" воркфлоу, чтобы серверы работали
               echo "Server is running. Workflow will not exit."
+
+              # ИСПРАВЛЕНИЕ: Мы убрали 'exit 0' после этой строки.
+              # Теперь скрипт "зависнет" на этой команде, как и нужно,
+              # и не будет завершаться, поддерживая работу фоновых процессов.
               tail -f /dev/null
-              exit 0
             fi
             sleep 2
           done
           
-          # Если мы вышли из цикла, значит URL не появился за 90 секунд
+          # Этот код выполнится, только если URL не будет найден за 90 секунд
           echo "::error::Failed to get Cloudflared URL within 90 seconds."
           echo "Dumping cloudflared.log:"
           cat cloudflared.log
