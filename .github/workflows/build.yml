@@ -1,26 +1,67 @@
-name: Internet Speed Test
+name: FastAPI via Cloudflared
 
 on:
   workflow_dispatch:
 
 jobs:
-  run-speedtest:
+  run-fastapi-service:
     runs-on: ubuntu-latest
-
+    
     steps:
-      - name: Install Speedtest CLI
-        run: |
-          # Скачиваем архив с официального сайта
-          curl -Lo speedtest.tgz https://install.speedtest.net/app/cli/ookla-speedtest-1.2.0-linux-x86_64.tgz
-          # Распаковываем его
-          tar -xzf speedtest.tgz
-
-      - name: Run Speedtest and Save Result
-        # Запускаем бинарник из текущей папки и принимаем лицензию
-        run: ./speedtest --accept-license --accept-gdpr > speedtest-result.txt
-
-      - name: Upload Speedtest Result
-        uses: actions/upload-artifact@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          name: speedtest-report
-          path: speedtest-result.txt
+          python-version: '3.11' # Используем актуальную версию Python
+
+      - name: Install Python dependencies
+        run: pip install fastapi "uvicorn[standard]" uvloop httptools
+
+      - name: Create FastAPI app file
+        run: |
+          echo 'from fastapi import FastAPI
+          
+app = FastAPI()
+
+@app.get("/")
+async def main():
+    return {"message": "Hello, World!"}' > main.py
+
+      - name: Install Cloudflared
+        run: |
+          # Скачиваем deb-пакет и устанавливаем его
+          curl -L --output cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared.deb
+
+      - name: Run Cloudflared and FastAPI server
+        run: |
+          # Запускаем Uvicorn в фоновом режиме. Он будет слушать порт 8000
+          # Используем 4 воркера, uvloop для цикла событий и httptools для парсинга HTTP
+          uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4 --loop uvloop --http httptools &
+          
+          # Даем Uvicorn пару секунд на запуск
+          sleep 5
+          
+          # Запускаем Cloudflared для создания туннеля к нашему локальному серверу на порту 8000
+          # Вывод Cloudflared перенаправляем в лог-файл, чтобы извлечь оттуда URL
+          # --no-autoupdate флаг важен для CI/CD окружений
+          cloudflared tunnel --url http://localhost:8000 --no-autoupdate > cloudflared.log 2>&1 &
+
+          # Ждем, пока Cloudflared сгенерирует и запишет URL в лог (обычно 5-15 секунд)
+          # Этот цикл будет пытаться найти URL каждые 2 секунды
+          echo "Waiting for Cloudflared URL..."
+          while ! grep -q "trycloudflare.com" cloudflared.log; do
+            sleep 2
+          done
+          
+          # Извлекаем URL из лога, выводим его в консоль GitHub Actions и завершаем этот шаг
+          # Вывод сделан заметным, чтобы его было легко найти в логах
+          PUBLIC_URL=$(grep -o 'https://.*\.trycloudflare.com' cloudflared.log)
+          echo "===================================================================="
+          echo "✅ Your public URL is: $PUBLIC_URL"
+          echo "===================================================================="
+          
+          # Бесконечный цикл, чтобы воркфлоу не завершился
+          # Серверы (Uvicorn и Cloudflared) уже работают в фоне
+          # Этот шаг будет "висеть", пока вы не отмените workflow или не истечет лимит времени GitHub Actions (6 часов)
+          echo "Server is running. Workflow will not exit."
+          tail -f /dev/null
