@@ -11,57 +11,63 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11' # Используем актуальную версию Python
+          python-version: '3.11'
 
       - name: Install Python dependencies
         run: pip install fastapi "uvicorn[standard]" uvloop httptools
 
       - name: Create FastAPI app file
+        # ИСПРАВЛЕНИЕ: Используем heredoc (cat << 'EOF') для надежной записи
+        # многострочного файла. Это решает проблему с символом '@'.
         run: |
-          echo 'from fastapi import FastAPI
-          
-app = FastAPI()
+          cat << 'EOF' > main.py
+          from fastapi import FastAPI
 
-@app.get("/")
-async def main():
-    return {"message": "Hello, World!"}' > main.py
+          app = FastAPI()
+
+          @app.get("/")
+          async def main():
+              return {"message": "Hello, World!"}
+          EOF
 
       - name: Install Cloudflared
         run: |
-          # Скачиваем deb-пакет и устанавливаем его
           curl -L --output cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared.deb
 
       - name: Run Cloudflared and FastAPI server
         run: |
-          # Запускаем Uvicorn в фоновом режиме. Он будет слушать порт 8000
-          # Используем 4 воркера, uvloop для цикла событий и httptools для парсинга HTTP
+          # Запускаем Uvicorn в фоновом режиме
           uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4 --loop uvloop --http httptools &
           
           # Даем Uvicorn пару секунд на запуск
           sleep 5
           
-          # Запускаем Cloudflared для создания туннеля к нашему локальному серверу на порту 8000
-          # Вывод Cloudflared перенаправляем в лог-файл, чтобы извлечь оттуда URL
-          # --no-autoupdate флаг важен для CI/CD окружений
+          # Запускаем Cloudflared для создания туннеля
           cloudflared tunnel --url http://localhost:8000 --no-autoupdate > cloudflared.log 2>&1 &
 
-          # Ждем, пока Cloudflared сгенерирует и запишет URL в лог (обычно 5-15 секунд)
-          # Этот цикл будет пытаться найти URL каждые 2 секунды
+          # Ждем, пока Cloudflared сгенерирует и запишет URL в лог
           echo "Waiting for Cloudflared URL..."
-          while ! grep -q "trycloudflare.com" cloudflared.log; do
+          for i in {1..10}; do
+            if grep -q "trycloudflare.com" cloudflared.log; then
+              break
+            fi
+            echo "Still waiting..."
             sleep 2
           done
           
-          # Извлекаем URL из лога, выводим его в консоль GitHub Actions и завершаем этот шаг
-          # Вывод сделан заметным, чтобы его было легко найти в логах
+          # Извлекаем URL и выводим его в консоль
           PUBLIC_URL=$(grep -o 'https://.*\.trycloudflare.com' cloudflared.log)
+          if [ -z "$PUBLIC_URL" ]; then
+            echo "::error::Could not retrieve Cloudflared URL. Tailing log for debug:"
+            cat cloudflared.log
+            exit 1
+          fi
+
           echo "===================================================================="
           echo "✅ Your public URL is: $PUBLIC_URL"
           echo "===================================================================="
           
           # Бесконечный цикл, чтобы воркфлоу не завершился
-          # Серверы (Uvicorn и Cloudflared) уже работают в фоне
-          # Этот шаг будет "висеть", пока вы не отмените workflow или не истечет лимит времени GitHub Actions (6 часов)
           echo "Server is running. Workflow will not exit."
           tail -f /dev/null
