@@ -33,47 +33,57 @@ jobs:
           curl -L --output cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared.deb
 
-      - name: Run Cloudflared and FastAPI server
+      - name: Run Services and Get Public URL
+        # Устанавливаем таймаут для всего шага на 10 минут, чтобы он не упал раньше времени
+        timeout-minutes: 10
         run: |
-          # Запускаем Uvicorn в фоновом режиме
+          # Запускаем Uvicorn в фоне
           uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4 --loop uvloop --http httptools &
+          # Сохраняем PID процесса Uvicorn, чтобы потом проверить, что он жив
+          UVICORN_PID=$!
           
-          # Даем Uvicorn пару секунд на запуск
+          # Даем Uvicorn время на старт
           sleep 5
           
-          # ИСПРАВЛЕНИЕ: Создаем пустой лог-файл ЗАРАНЕЕ.
-          # Это предотвратит падение команды grep, если cloudflared еще не успел создать файл.
-          touch cloudflared.log
+          # Запускаем Cloudflared в фоне, используя нативный логгер
+          cloudflared tunnel --url http://localhost:8000 --no-autoupdate --logfile cloudflared.log &
+          # Сохраняем PID процесса Cloudflared
+          CLOUDFLARED_PID=$!
           
-          # Запускаем Cloudflared и направляем его вывод в лог
-          cloudflared tunnel --url http://localhost:8000 --no-autoupdate > cloudflared.log 2>&1 &
-
-          # Ждем, пока Cloudflared сгенерирует URL.
-          # Увеличили таймаут на всякий случай.
-          echo "Waiting for Cloudflared URL..."
-          for i in {1..15}; do
-            if grep -q "trycloudflare.com" cloudflared.log; then
-              break
+          echo "Waiting for Cloudflared URL... (up to 90 seconds)"
+          
+          # Умный цикл ожидания
+          for i in {1..45}; do
+            # Проверяем, не упали ли наши процессы
+            if ! kill -0 $UVICORN_PID 2>/dev/null; then
+              echo "::error::Uvicorn process has died."
+              exit 1
             fi
-            echo "Still waiting... (attempt $i/15)"
+            if ! kill -0 $CLOUDFLARED_PID 2>/dev/null; then
+              echo "::error::Cloudflared process has died. See log:"
+              cat cloudflared.log
+              exit 1
+            fi
+          
+            # Ищем URL в логе
+            URL=$(grep -o 'https://.*\.trycloudflare.com' cloudflared.log)
+            if [ -n "$URL" ]; then
+              echo "===================================================================="
+              echo "✅ Your public URL is: $URL"
+              echo "===================================================================="
+              # Запускаем бесконечный процесс, чтобы воркфлоу не завершился
+              # Теперь, когда URL получен, мы можем "зависнуть"
+              echo "Server is running. Workflow will not exit."
+              tail -f /dev/null
+              exit 0
+            fi
+            
+            echo "Still waiting... (attempt $i/45)"
             sleep 2
           done
           
-          # Извлекаем URL и выводим его в консоль
-          PUBLIC_URL=$(grep -o 'https://.*\.trycloudflare.com' cloudflared.log)
-
-          # Теперь этот блок обработки ошибок сработает корректно, если URL не будет найден
-          if [ -z "$PUBLIC_URL" ]; then
-            echo "::error::Could not retrieve Cloudflared URL after 30 seconds."
-            echo "::error::Displaying cloudflared.log for debugging:"
-            cat cloudflared.log
-            exit 1
-          fi
-
-          echo "===================================================================="
-          echo "✅ Your public URL is: $PUBLIC_URL"
-          echo "===================================================================="
-          
-          # Бесконечный цикл, чтобы воркфлоу не завершился
-          echo "Server is running. Workflow will not exit."
-          tail -f /dev/null
+          # Если мы вышли из цикла, значит URL не появился за 90 секунд
+          echo "::error::Failed to get Cloudflared URL within 90 seconds."
+          echo "Dumping cloudflared.log:"
+          cat cloudflared.log
+          exit 1
